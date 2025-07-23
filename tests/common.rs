@@ -25,19 +25,15 @@ pub fn server_ready(addr: &str, retries: u32) -> bool {
     false
 }
 
-pub fn spawn_server(port: u16) -> Child {
-    Command::new(CRIU_COORDINATOR_PATH)
-        .args([
-            "server",
-            "--address",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-            "--max-retries",
-            "5",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Failed to spawn criu-coordinator server. Did you run `cargo build`?")
+pub fn spawn_server(address: &str, port: u16) -> Child {
+    let mut cmd = Command::new("target/debug/criu-coordinator");
+    cmd.arg("server")
+        .arg("--address")
+        .arg(address)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--max-retries")
+        .arg("5");
+    println!("Spawning server: {:?}", cmd);
+    cmd.spawn().expect("Failed to spawn server")
 }

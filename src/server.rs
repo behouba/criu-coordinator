@@ -109,9 +109,6 @@ impl Server {
 
     /// Handle a client connection.
     fn handle_client(&self, tcp_stream: Arc<Mutex<TcpStream>>) {
-        info!("[>>] Receive client ID, action and dependencies");
-
-        // Read the client message from the TCP stream.
         let client_msg = match self.read_message(&tcp_stream) {
             Some(msg) => msg,
             None => {
@@ -120,66 +117,56 @@ impl Server {
             }
         };
 
-        info!("[{}] [>>] ID: {}", client_msg.id, client_msg.id);
-        info!("[{}] [>>] ACTION: {}", client_msg.id, client_msg.action);
+        info!("[{}] Received action: {}", client_msg.id, client_msg.action);
         info!(
-            "[{}] [>>] DEPENDENCIES: {}",
+            "[{}] Dependencies: {}",
             client_msg.id,
             client_msg.dependencies.join(", ")
         );
 
+        // --- SPECIAL HANDLERS ---
         if client_msg.id == "kubescr" && client_msg.action == ACTION_ADD_DEPENDENCIES {
             self.handle_add_kubesrc_dependencies(&client_msg, &tcp_stream);
             return;
         }
-
         if client_msg.action == ACTION_POST_DUMP {
             self.handle_post_dump(&client_msg, &tcp_stream);
             return;
         }
-
         if client_msg.action == ACTION_POST_RESTORE {
-            info!("[{}] [==] Post-restore action received", client_msg.id);
-            // For post-restore, we just acknowledge and close the connection
             self.send_response(&client_msg.id, MESSAGE_ACK, &tcp_stream);
             self.close_client_connection(&client_msg, tcp_stream);
             return;
         }
 
-        let mut response_message = self.get_response_message(&client_msg.id);
-
+        // --- BARRIER SYNCHRONIZATION LOGIC ---
+        let mut response_message = self.register_client_for_action(&client_msg);
         if response_message != MESSAGE_ACK {
             self.send_response(&client_msg.id, response_message, &tcp_stream);
             self.close_client_connection(&client_msg, tcp_stream);
             return;
         }
 
-        // Wait for dependencies to connect if there are any
-        if !client_msg.dependencies.is_empty() && !self.wait_for_dependencies_connection(&client_msg) {
-            response_message = MESSAGE_TIMEOUT;
+        if !client_msg.dependencies.is_empty() {
+            if !self.wait_for_dependencies_connection(&client_msg) {
+                response_message = MESSAGE_TIMEOUT;
+            }
         }
 
-        // Send response message in case of a timeout during connection wait.
-        if response_message != MESSAGE_ACK {
-            self.send_response(&client_msg.id, response_message, &tcp_stream);
-            self.close_client_connection(&client_msg, tcp_stream);
-            return;
-        }
+        if response_message == MESSAGE_ACK {
+            self.mark_client_ready(&client_msg);
 
-        // Mark the current client as ready now that its dependencies are connected
-        if let Some(x) = self.clients.lock().unwrap().get_mut(&client_msg.id) {
-            info!("[{}] [==] Client is ready", client_msg.id);
-            x.set_ready(true);
-        }
-
-        // Wait for dependencies to become ready if there are any
-        if !client_msg.dependencies.is_empty() && !self.wait_for_dependencies_readiness(&client_msg) {
-            response_message = MESSAGE_TIMEOUT;
+            if !client_msg.dependencies.is_empty() {
+                if !self.wait_for_dependencies_readiness(&client_msg) {
+                    response_message = MESSAGE_TIMEOUT;
+                }
+            }
         }
 
         self.send_response(&client_msg.id, response_message, &tcp_stream);
 
-        if client_msg.action == ACTION_PRE_STREAM {
+        // Specific logic for streaming after the barrier
+        if client_msg.action == ACTION_PRE_STREAM && response_message == MESSAGE_ACK {
             if !self.wait_for_syn_response(&client_msg, &tcp_stream) {
                 return;
             }
@@ -189,8 +176,76 @@ impl Server {
             self.handle_pre_stream(&client_msg, &tcp_stream);
         }
 
-        // Close TCP connection with client
         self.close_client_connection(&client_msg, tcp_stream);
+    }
+
+    fn register_client_for_action(&self, msg: &ClientMessage) -> &'static str {
+        let mut clients_lock = self.clients.lock().unwrap();
+        if let Some(status) = clients_lock.get_mut(&msg.id) {
+            // Client is known, update its state for the new action.
+            status.set_ready(false); // Reset ready state for the new barrier
+            status.set_action(&msg.action);
+            info!("[{}] Registered for action {}", msg.id, msg.action);
+            MESSAGE_ACK
+        } else {
+            // First time this client connects
+            let mut status = ClientStatus::new();
+            status.set_action(&msg.action);
+            clients_lock.insert(msg.id.clone(), status);
+            info!(
+                "[{}] Inserted client and registered for action {}",
+                msg.id, msg.action
+            );
+            MESSAGE_ACK
+        }
+    }
+
+    fn mark_client_ready(&self, msg: &ClientMessage) {
+        if let Some(status) = self.clients.lock().unwrap().get_mut(&msg.id) {
+            info!("[{}] Marked as ready for action {}", msg.id, msg.action);
+            status.set_ready(true);
+        }
+    }
+
+    fn wait_for_dependencies_readiness(&self, msg: &ClientMessage) -> bool {
+        info!(
+            "[{}] Waiting for dependencies to be ready for action '{}'",
+            msg.id, msg.action
+        );
+        for dependency in msg.dependencies.iter() {
+            if dependency.is_empty() {
+                continue;
+            }
+            let mut retry_count = self.max_retries;
+            loop {
+                let is_ready = {
+                    let clients_lock = self.clients.lock().unwrap();
+                    clients_lock
+                        .get(dependency)
+                        .map_or(false, |s| s.is_ready_for_action(&msg.action))
+                };
+
+                if is_ready {
+                    info!(
+                        "[{}] Dependency {} is ready for action '{}'",
+                        msg.id, dependency, msg.action
+                    );
+                    break;
+                }
+
+                if retry_count > 0 {
+                    retry_count -= 1;
+                    thread::sleep(time::Duration::from_secs(1));
+                } else {
+                    error!(
+                        "[{}] Timeout waiting for dependency {} to be ready for action '{}'",
+                        msg.id, dependency, msg.action
+                    );
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn read_message(&self, tcp_stream: &Arc<Mutex<TcpStream>>) -> Option<ClientMessage> {
@@ -299,47 +354,47 @@ impl Server {
         true
     }
 
-    fn wait_for_dependencies_readiness(&self, msg: &ClientMessage) -> bool {
-        info!("[{}] [==] Wait for all dependencies to be ready", msg.id);
+    // fn wait_for_dependencies_readiness(&self, msg: &ClientMessage) -> bool {
+    //     info!("[{}] [==] Wait for all dependencies to be ready", msg.id);
 
-        for dependency in msg.dependencies.iter() {
-            if dependency.is_empty() {
-                continue;
-            }
-            info!(
-                "[{}] [==] Checking readiness of dependency: {}",
-                msg.id, dependency
-            );
+    //     for dependency in msg.dependencies.iter() {
+    //         if dependency.is_empty() {
+    //             continue;
+    //         }
+    //         info!(
+    //             "[{}] [==] Checking readiness of dependency: {}",
+    //             msg.id, dependency
+    //         );
 
-            let mut retry_count = self.max_retries;
+    //         let mut retry_count = self.max_retries;
 
-            loop {
-                // Acquire the lock to check the status of the dependency
-                let clients_lock = self.clients.lock().unwrap();
-                if let Some(status) = clients_lock.get(dependency) {
-                    if status.is_ready() {
-                        info!("[{}] [==] Dependency {} is ready", msg.id, dependency);
-                        break;
-                    }
-                }
+    //         loop {
+    //             // Acquire the lock to check the status of the dependency
+    //             let clients_lock = self.clients.lock().unwrap();
+    //             if let Some(status) = clients_lock.get(dependency) {
+    //                 if status.is_ready() {
+    //                     info!("[{}] [==] Dependency {} is ready", msg.id, dependency);
+    //                     break;
+    //                 }
+    //             }
 
-                // Release the lock before potentially sleeping
-                drop(clients_lock);
+    //             // Release the lock before potentially sleeping
+    //             drop(clients_lock);
 
-                if retry_count > 0 {
-                    retry_count -= 1;
-                    thread::sleep(time::Duration::from_secs(1));
-                } else {
-                    error!(
-                        "[{}] [!!] Timeout waiting for dependency {} to be ready",
-                        msg.id, dependency
-                    );
-                    return false;
-                }
-            }
-        }
-        true
-    }
+    //             if retry_count > 0 {
+    //                 retry_count -= 1;
+    //                 thread::sleep(time::Duration::from_secs(1));
+    //             } else {
+    //                 error!(
+    //                     "[{}] [!!] Timeout waiting for dependency {} to be ready",
+    //                     msg.id, dependency
+    //                 );
+    //                 return false;
+    //             }
+    //         }
+    //     }
+    //     true
+    // }
 
     /// Handle adding dependencies for kubesrc client
     fn handle_add_kubesrc_dependencies(
@@ -375,79 +430,82 @@ impl Server {
     /// Handle post-dump action
     fn handle_post_dump(&self, msg: &ClientMessage, tcp_stream: &Arc<Mutex<TcpStream>>) {
         info!(
-            "[{}] [==] Wait for all dependencies to create local checkpoint",
+            "[{}] [==] Received post-dump, waiting for dependencies to finish their checkpoints",
             msg.id
         );
 
-        let mut response_message = MESSAGE_ACK;
-
+        // Step 1: Mark self as having reached the post-dump checkpoint barrier.
+        // This must be done *before* waiting for dependencies.
         {
             let mut clients_lock = self.clients.lock().unwrap();
             if let Some(status) = clients_lock.get_mut(&msg.id) {
                 if status.has_local_checkpoint() {
-                    response_message = MESSAGE_CHECKPOINT_EXISTS;
-                } else {
-                    status.set_local_checkpoint();
+                    // This shouldn't happen with the new logic, but as a safeguard:
+                    self.send_response(&msg.id, MESSAGE_CHECKPOINT_EXISTS, tcp_stream);
+                    self.close_client_connection(msg, tcp_stream.clone());
+                    return;
                 }
+                status.set_local_checkpoint();
             } else {
                 error!(
                     "[!!] Client {} not found in clients_set during post-dump",
                     msg.id
                 );
-                response_message = MESSAGE_NOT_CONNECTED;
+                self.send_response(&msg.id, MESSAGE_NOT_CONNECTED, tcp_stream);
+                self.close_client_connection(msg, tcp_stream.clone());
+                return;
             }
-        }
+        } // Lock released
 
-        // Wait until all dependencies have also set their local_checkpoint.
-        if response_message == MESSAGE_ACK {
-            for dependency in msg.dependencies.iter() {
-                info!(
-                    "[{}] [==] Waiting for dependency {} to complete its local checkpoint",
-                    msg.id, dependency
-                );
+        // Step 2: Now wait for all dependencies to also reach this barrier.
+        let mut response_message = MESSAGE_ACK;
+        for dependency in msg.dependencies.iter() {
+            if dependency.is_empty() {
+                continue;
+            }
+            info!(
+                "[{}] [==] Waiting for dependency {} to complete its local checkpoint",
+                msg.id, dependency
+            );
 
-                let mut retry_count = self.max_retries;
+            let mut retry_count = self.max_retries;
+            loop {
+                let dependency_completed = {
+                    let clients_lock = self.clients.lock().unwrap();
+                    // If the dependency is not in the map, it means it has already finished
+                    // post-dump and been removed. This is a valid "completed" state.
+                    clients_lock
+                        .get(dependency)
+                        .map_or(true, |s| s.has_local_checkpoint())
+                };
 
-                loop {
-                    let dependency_completed = {
-                        let clients_lock = self.clients.lock().unwrap();
-                        if let Some(dep_status) = clients_lock.get(dependency) {
-                            dep_status.has_local_checkpoint()
-                        } else {
-                            // In post-dump phase, dependency not found might have already completed and been removed
-                            // so we assume it has completed.
-                            true
-                        }
-                    };
-
-                    if dependency_completed {
-                        info!(
-                            "[{}] [==] Dependency {} has completed its local checkpoint",
-                            msg.id, dependency
-                        );
-                        break;
-                    }
-
-                    if retry_count > 0 {
-                        retry_count -= 1;
-                        thread::sleep(time::Duration::from_secs(1));
-                    } else {
-                        error!(
-                            "[{}] [!!] Timeout waiting for dependency {}",
-                            msg.id, dependency
-                        );
-                        response_message = MESSAGE_TIMEOUT;
-                        break;
-                    }
+                if dependency_completed {
+                    info!(
+                        "[{}] [==] Dependency {} has completed its local checkpoint",
+                        msg.id, dependency
+                    );
+                    break;
                 }
 
-                if response_message != MESSAGE_ACK {
+                if retry_count > 0 {
+                    retry_count -= 1;
+                    thread::sleep(time::Duration::from_secs(1));
+                } else {
+                    error!(
+                        "[{}] [!!] Timeout waiting for dependency {}",
+                        msg.id, dependency
+                    );
+                    response_message = MESSAGE_TIMEOUT;
                     break;
                 }
             }
+
+            if response_message != MESSAGE_ACK {
+                break;
+            }
         }
 
-        // Respond with ACK to indicate that all local checkpoints have been successful.
+        // Step 3: Respond and clean up.
         self.send_response(&msg.id, response_message, tcp_stream);
         self.close_client_connection(msg, tcp_stream.clone());
     }

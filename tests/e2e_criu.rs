@@ -317,8 +317,9 @@ fn e2e_dump_and_restore_with_criu() {
         .to_owned();
 
     let port = pick_port();
+    let domain = "127.0.0.1";
     let addr = format!("127.0.0.1:{}", port);
-    let server = spawn_server(port);
+    let server = spawn_server(domain, port);
     assert!(
         server_ready(&addr, 20),
         "Server failed to start at {}",
@@ -445,8 +446,9 @@ fn e2e_dump_and_restore_tcp_client_server() {
         .to_owned();
 
     let coordinator_port = pick_port();
+    let coordinator_domain = "127.0.0.1";
     let coordinator_addr = format!("127.0.0.1:{}", coordinator_port);
-    let server = spawn_server(coordinator_port);
+    let server = spawn_server(coordinator_domain, coordinator_port);
     assert!(
         server_ready(&coordinator_addr, 20),
         "Coordinator server failed to start at {}",
@@ -478,8 +480,6 @@ fn e2e_dump_and_restore_tcp_client_server() {
                     "-j",
                     "-v4",
                     "--tcp-established",
-                    "--network-lock",
-                    "iptables",
                     "--action-script",
                     &coordinator_path_clone,
                 ])

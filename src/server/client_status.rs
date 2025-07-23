@@ -17,11 +17,11 @@
  *
  */
 
-
-pub struct ClientStatus {
+ pub struct ClientStatus {
     connected: bool,
     ready: bool,
     local_checkpoint: bool,
+    current_action: String, // Add this field
 }
 
 impl ClientStatus {
@@ -30,9 +30,20 @@ impl ClientStatus {
             connected: true,
             ready: false,
             local_checkpoint: false,
+            current_action: String::new(), // Initialize
         }
     }
+    
+    // Add setter for current_action
+    pub fn set_action(&mut self, action: &str) {
+        self.current_action = action.to_string();
+    }
+    
+    pub fn is_ready_for_action(&self, action: &str) -> bool {
+        self.ready && self.current_action == action
+    }
 
+    // ... other methods ...
     pub fn is_connected(&self) -> bool {
         self.connected
     }

@@ -26,6 +26,7 @@ mod logger;
 
 use constants::*;
 use config::Config;
+use log::info;
 use std::collections::HashMap;
 use std::{env, path::PathBuf, process::exit, fs, os::unix::prelude::FileTypeExt};
 use std::path::Path;
@@ -38,6 +39,7 @@ use cli::{Opts, Mode, DEFAULT_ADDRESS, DEFAULT_PORT};
 use client::run_client;
 use server::run_server;
 use logger::init_logger;
+use serde::Deserialize;
 
 struct ClientConfig {
     log_file: String,
@@ -47,59 +49,89 @@ struct ClientConfig {
     dependencies: String,
 }
 
-const CONFIG_KEY_ID: &str = "id";
-const CONFIG_KEY_DEPS: &str = "dependencies";
-const CONFIG_KEY_ADDR: &str = "address";
-const CONFIG_KEY_PORT: &str = "port";
-const CONFIG_KEY_LOG: &str = "log-file";
+#[derive(Deserialize, Debug)]
+struct ContainerConfig {
+    id: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
 
-fn load_config_file<P: AsRef<Path>>(images_dir: P) -> ClientConfig {
+// FIX: Add derive macro
+#[derive(Deserialize, Debug)]
+struct GlobalConfig {
+    address: String,
+    port: u16,
+    #[serde(rename = "log-file", default = "default_log_file")]
+    log_file: String,
+    containers: HashMap<String, ContainerConfig>, // Key is Host PID
+}
+
+fn default_log_file() -> String {
+    "-".to_string()
+}
+
+
+// const CONFIG_KEY_ID: &str = "id";
+// const CONFIG_KEY_DEPS: &str = "dependencies";
+// const CONFIG_KEY_ADDR: &str = "address";
+// const CONFIG_KEY_PORT: &str = "port";
+// const CONFIG_KEY_LOG: &str = "log-file";
+
+
+fn load_config_file<P: AsRef<Path>>(images_dir: P, init_pid: Option<&str>) -> ClientConfig {
     let images_dir = images_dir.as_ref();
-    let mut config_file = images_dir.join(Path::new(CONFIG_FILE));
-    if !config_file.is_file() {
-        // The following allows us to load global config files from /etc/criu.
-        // This is useful for example when we want to use the same config file
-        // for multiple containers.
-        let config_dir = PathBuf::from("/etc/criu");
-        config_file = config_dir.join(Path::new(CONFIG_FILE));
-        if !config_file.is_file() {
-            panic!("config file does not exist")
+    let local_config_path = images_dir.join(Path::new(CONFIG_FILE));
+    let global_config_path = PathBuf::from("/etc/criu").join(Path::new(CONFIG_FILE));
+
+    let config_file_path = if local_config_path.is_file() {
+        info!("Loading local config from {:?}", local_config_path);
+        local_config_path
+    } else if global_config_path.is_file() {
+        info!("Loading global config from {:?}", global_config_path);
+        global_config_path
+    } else {
+        panic!("No config file found at {:?} or {:?}", local_config_path, global_config_path);
+    };
+
+    let settings = Config::builder()
+        .add_source(config::File::from(config_file_path))
+        .build()
+        .expect("Failed to build config");
+
+    // Try to parse as GlobalConfig first
+    if let Ok(global_config) = settings.clone().try_deserialize::<GlobalConfig>() {
+        if !global_config.containers.is_empty() {
+            let init_pid_str = init_pid.expect("INIT_PID is required for global container config");
+            let container_config = global_config
+                .containers
+                .get(init_pid_str)
+                .unwrap_or_else(|| panic!("Configuration for PID {} not found in containers map", init_pid_str));
+
+            return ClientConfig {
+                log_file: global_config.log_file.to_string(),
+                address: global_config.address.to_string(),
+                port: global_config.port.to_string(),
+                id: container_config.id.to_string(),
+                dependencies: container_config.dependencies.join(":"),
+            };
         }
     }
 
-    let settings = Config::builder().add_source(config::File::from(config_file)).build().unwrap();
-    let settings_map = settings.try_deserialize::<HashMap<String, String>>().unwrap();
+    // Fallback to simple key-value parsing for process-based tests
+    info!("Falling back to simple key-value config parsing.");
+    let settings_map = settings.try_deserialize::<HashMap<String, String>>().expect("Failed to parse simple config");
 
-    if !settings_map.contains_key(CONFIG_KEY_ID) {
-        panic!("id missing in config file")
-    }
-    let id = settings_map.get(CONFIG_KEY_ID).unwrap();
-
-    let mut dependencies = String::new();
-    if settings_map.contains_key(CONFIG_KEY_DEPS) {
-        dependencies = settings_map.get(CONFIG_KEY_DEPS).unwrap().to_string();
-    }
-
-    let mut address = DEFAULT_ADDRESS;
-    if settings_map.contains_key(CONFIG_KEY_ADDR) {
-        address = settings_map.get(CONFIG_KEY_ADDR).unwrap();
-    }
-
-    let mut port = DEFAULT_PORT;
-    if settings_map.contains_key(CONFIG_KEY_PORT) {
-        port = settings_map.get(CONFIG_KEY_PORT).unwrap();
-    }
-
-    let mut log_file = "-";
-    if settings_map.contains_key(CONFIG_KEY_LOG) {
-        log_file = settings_map.get(CONFIG_KEY_LOG).unwrap();
-    }
+    let id = settings_map.get("id").expect("id missing in config file").to_string();
+    let dependencies = settings_map.get("dependencies").map_or(String::new(), |s| s.clone());
+    let address = settings_map.get("address").map_or(DEFAULT_ADDRESS.to_string(), |s| s.clone());
+    let port = settings_map.get("port").map_or(DEFAULT_PORT.to_string(), |s| s.clone());
+    let log_file = settings_map.get("log-file").map_or("-".to_string(), |s| s.clone());
 
     ClientConfig {
-        log_file: log_file.to_string(),
-        address: address.to_string(),
-        port: port.to_string(),
-        id: id.to_string(),
+        log_file,
+        address,
+        port,
+        id,
         dependencies,
     }
 }
@@ -110,7 +142,20 @@ fn main() {
         let images_dir = PathBuf::from(env::var(ENV_IMAGE_DIR)
             .unwrap_or_else(|_| panic!("Missing {} environment variable", ENV_IMAGE_DIR)));
 
-        let client_config = load_config_file(&images_dir);
+        // let client_config = load_config_file(&images_dir);
+
+        let init_pid = env::var(ENV_INIT_PID).ok();
+
+        let client_config = load_config_file(&images_dir, init_pid.as_deref());
+        // if action == ACTION_NETWORK_LOCK || action == ACTION_NETWORK_UNLOCK {
+        //     if let Ok(init_pid) = env::var(ENV_INIT_PID) {
+        //         info!("CRTOOLS_INIT_PID: {}", init_pid);
+        //     } else {
+        //         info!("CRTOOLS_INIT_PID not found in environement.");
+        //     }
+        // }
+
+        info!("action: {}", action);
 
         // Ignore all action hooks other than "pre-stream", "pre-dump" and "pre-restore".
         let enable_streaming = match action.as_str() {
@@ -129,6 +174,8 @@ fn main() {
             },
             ACTION_POST_DUMP => false,
             ACTION_PRE_RESTORE => false,
+            ACTION_NETWORK_LOCK => false,
+            ACTION_NETWORK_UNLOCK => false,
             _ => exit(0)
         };
 

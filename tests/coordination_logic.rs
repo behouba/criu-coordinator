@@ -59,8 +59,10 @@ fn run_test(s: Scenario) {
     println!("\n================  {}  =================\n", s.name);
 
     let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    let mut server = spawn_server(port);
+    let domain = "127.0.0.1";
+
+    let mut server = spawn_server(domain, port);
+    let addr: String = format!("127.0.0.1:{port}");
     assert!(server_ready(&addr, 20), "server failed to start");
 
     // Group by ID to keep pre and post phases together

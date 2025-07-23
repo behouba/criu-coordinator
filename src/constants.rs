@@ -24,11 +24,15 @@ pub const ACTION_POST_RESTORE: &str = "post-restore";
 pub const ACTION_PRE_STREAM: &str = "pre-stream";
 pub const ACTION_POST_STREAM: &str = "post-stream";
 pub const ACTION_ADD_DEPENDENCIES: &str = "add-dependencies";
+pub const ACTION_NETWORK_LOCK: &str = "network-lock";
+pub const ACTION_NETWORK_UNLOCK: &str = "network-unlock";
 
 /// ENV_ACTION specifies the CRIU hook that is currently being used.
 pub const ENV_ACTION: &str = "CRTOOLS_SCRIPT_ACTION";
 /// ENV_IMAGE_DIR specifies path as used a base directory for CRIU images.
 pub const ENV_IMAGE_DIR: &str = "CRTOOLS_IMAGE_DIR";
+/// ENV_INIT_PID specifies the root PID of the task being checkpointed/restored
+pub const ENV_INIT_PID: &str = "CRTOOLS_INIT_PID";
 
 /// Unix socket used for "criu dump".
 pub const IMG_STREAMER_CAPTURE_SOCKET_NAME: &str = "streamer-capture.sock";
