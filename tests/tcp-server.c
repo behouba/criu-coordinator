@@ -12,11 +12,15 @@ static void serve_new_conn(int sk)
     printf("New connection\n");
     while (1) {
         sleep(1);
-        if ((write(sk, &counter, sizeof(counter))) <= 0) {
-            perror("Can't write socket");
-            return;
-        }
-        counter++;
+        // Check that write was successful before printing
+		if ((write(sk, &counter, sizeof(counter))) > 0) {
+			printf("Server -> Client: %d\n", counter);
+			fflush(stdout); // Flush output to make it available to `podman logs`
+			counter++;
+		} else {
+			perror("Can't write socket");
+			return;
+		}
     }
 }
 
@@ -79,7 +83,6 @@ static int main_srv(int argc, char **argv)
         }
     }
 }
-
 
 int main(int argc, char **argv)
 {

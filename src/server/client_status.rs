@@ -17,6 +17,11 @@
  *
  */
 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    Dump,
+    Restore,
+}
 
 pub struct ClientStatus {
     connected: bool,
@@ -24,16 +29,18 @@ pub struct ClientStatus {
     local_checkpoint: bool,
     network_locked: bool,
     network_unlocked: bool,
+    operation: Operation,
 }
 
 impl ClientStatus {
-    pub fn new() -> Self {
+    pub fn new(operation: Operation) -> Self {
         Self {
             connected: true,
             ready: false,
             local_checkpoint: false,
             network_locked: false,
             network_unlocked: false,
+            operation,
         }
     }
 
@@ -71,5 +78,9 @@ impl ClientStatus {
 
     pub fn set_network_unlocked(&mut self) {
         self.network_unlocked = true;
+    }
+
+    pub fn get_operation(&self) -> Operation {
+        self.operation
     }
 }
