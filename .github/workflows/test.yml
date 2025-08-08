@@ -12,16 +12,30 @@ jobs:
 
     - name: Install System Dependencies
       run: |
-        sudo add-apt-repository ppa:criu/ppa
+        sudo add-apt-repository -y ppa:criu/ppa
         sudo apt-get update
-        sudo apt-get install -qqy protobuf-compiler libprotobuf-dev criu
+        sudo apt-get install -qqy protobuf-compiler libprotobuf-dev criu podman \
+        make git gcc build-essential pkgconf libtool \
+        libsystemd-dev libprotobuf-c-dev libcap-dev libseccomp-dev libyajl-dev \
+        go-md2man autoconf python3 automake
 
-    - name: Setup Rust toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-          toolchain: stable
-          override: true
+    - name:  Check CRIU version
+      run: criu --version
 
+    - name: Build and Install crun with CRIU support
+      run: |
+        git clone https://github.com/containers/crun
+        cd crun
+        ./autogen.sh
+        ./configure
+        make
+        sudo make install
+
+    - name: Replace crun with the compiled version
+      run: |
+        sudo rm -f /usr/bin/crun
+        sudo ln -s /usr/local/bin/crun /usr/bin/crun
+        
     - name: Run tests
       run: make test
 
