@@ -34,7 +34,7 @@ pub fn spawn_server(port: u16) -> Child {
             "--port",
             &port.to_string(),
             "--max-retries",
-            "5",
+            "10",
         ])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
