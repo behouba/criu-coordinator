@@ -25,84 +25,20 @@ mod pipeline;
 mod logger;
 
 use constants::*;
-use config::Config;
-use std::collections::HashMap;
+
 use std::{env, path::PathBuf, process::exit, fs, os::unix::prelude::FileTypeExt};
-use std::path::Path;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::{generate, Shell};
 use std::io;
 
-use cli::{Opts, Mode, DEFAULT_ADDRESS, DEFAULT_PORT};
+use cli::{Opts, Mode};
 use client::run_client;
 use server::run_server;
 use logger::init_logger;
 
-struct ClientConfig {
-    log_file: String,
-    address: String,
-    port: String,
-    id: String,
-    dependencies: String,
-}
+use crate::client::{load_config_file, is_dump_action, is_restore_action};
 
-const CONFIG_KEY_ID: &str = "id";
-const CONFIG_KEY_DEPS: &str = "dependencies";
-const CONFIG_KEY_ADDR: &str = "address";
-const CONFIG_KEY_PORT: &str = "port";
-const CONFIG_KEY_LOG: &str = "log-file";
-
-fn load_config_file<P: AsRef<Path>>(images_dir: P) -> ClientConfig {
-    let images_dir = images_dir.as_ref();
-    let mut config_file = images_dir.join(Path::new(CONFIG_FILE));
-    if !config_file.is_file() {
-        // The following allows us to load global config files from /etc/criu.
-        // This is useful for example when we want to use the same config file
-        // for multiple containers.
-        let config_dir = PathBuf::from("/etc/criu");
-        config_file = config_dir.join(Path::new(CONFIG_FILE));
-        if !config_file.is_file() {
-            panic!("config file does not exist")
-        }
-    }
-
-    let settings = Config::builder().add_source(config::File::from(config_file)).build().unwrap();
-    let settings_map = settings.try_deserialize::<HashMap<String, String>>().unwrap();
-
-    if !settings_map.contains_key(CONFIG_KEY_ID) {
-        panic!("id missing in config file")
-    }
-    let id = settings_map.get(CONFIG_KEY_ID).unwrap();
-
-    let mut dependencies = String::new();
-    if settings_map.contains_key(CONFIG_KEY_DEPS) {
-        dependencies = settings_map.get(CONFIG_KEY_DEPS).unwrap().to_string();
-    }
-
-    let mut address = DEFAULT_ADDRESS;
-    if settings_map.contains_key(CONFIG_KEY_ADDR) {
-        address = settings_map.get(CONFIG_KEY_ADDR).unwrap();
-    }
-
-    let mut port = DEFAULT_PORT;
-    if settings_map.contains_key(CONFIG_KEY_PORT) {
-        port = settings_map.get(CONFIG_KEY_PORT).unwrap();
-    }
-
-    let mut log_file = "-";
-    if settings_map.contains_key(CONFIG_KEY_LOG) {
-        log_file = settings_map.get(CONFIG_KEY_LOG).unwrap();
-    }
-
-    ClientConfig {
-        log_file: log_file.to_string(),
-        address: address.to_string(),
-        port: port.to_string(),
-        id: id.to_string(),
-        dependencies,
-    }
-}
 
 fn main() {
     if let Ok(action) = env::var(ENV_ACTION) {
@@ -110,7 +46,7 @@ fn main() {
         let images_dir = PathBuf::from(env::var(ENV_IMAGE_DIR)
             .unwrap_or_else(|_| panic!("Missing {} environment variable", ENV_IMAGE_DIR)));
 
-        let client_config = load_config_file(&images_dir);
+        let client_config = load_config_file(&images_dir, &action);
 
         // Ignore all action hooks other than "pre-stream", "pre-dump" and "pre-restore".
         let enable_streaming = match action.as_str() {
@@ -127,20 +63,25 @@ fn main() {
                     Err(_) => false
                 }
             },
-            ACTION_PRE_RESTORE => false,
-            ACTION_POST_DUMP => false,
-            ACTION_NETWORK_LOCK => false,
-            ACTION_NETWORK_UNLOCK => false,
-            _ => exit(0)
+            // ACTION_PRE_RESTORE => false,
+            // ACTION_POST_DUMP => false,
+            // ACTION_NETWORK_LOCK => false,
+            // ACTION_NETWORK_UNLOCK => false,
+            // _ => exit(0)
+            _ => false,
         };
 
-        init_logger(Some(&images_dir), client_config.log_file);
+        if !is_dump_action(&action) && !is_restore_action(&action) {
+            exit(0)
+        }
+
+        init_logger(Some(&images_dir), client_config.get_log_file().to_string());
 
         run_client(
-            &client_config.address,
-            client_config.port.parse().unwrap(),
-            &client_config.id,
-            &client_config.dependencies,
+            client_config.get_address(),
+            client_config.get_port().parse().unwrap(),
+            client_config.get_id(),
+            client_config.get_dependencies(),
             &action,
             &images_dir,
             enable_streaming
