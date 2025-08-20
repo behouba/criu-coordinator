@@ -143,10 +143,13 @@ impl Server {
             ACTION_NETWORK_UNLOCK => {
                 self.handle_network_unlock(&client_msg, &tcp_stream);
             }
-            ACTION_POST_RESTORE | ACTION_POST_RESUME => {
+            ACTION_POST_RESTORE => {
                 info!("[{}] [==] {} action received", client_msg.id, client_msg.action);
                 // For these actions, we just acknowledge.
                 self.send_response(&client_msg.id, MESSAGE_ACK, &tcp_stream);
+            }
+            ACTION_POST_RESUME => {
+                self.handle_post_resume(&client_msg, &tcp_stream);
             }
             _ => {
                 // Default logic for pre-dump, pre-restore, etc.
@@ -425,6 +428,72 @@ impl Server {
             response_message = MESSAGE_TIMEOUT;
         }
 
+        self.send_response(&msg.id, response_message, tcp_stream);
+    }
+
+    fn handle_post_resume(&self, msg: &ClientMessage, tcp_stream: &Arc<Mutex<TcpStream>>) {
+        let mut response_message = MESSAGE_ACK;
+
+        // Set the client's status to indicate it has reached the post-resume hook.
+        if let Some(status) = self.clients.lock().unwrap().get_mut(&msg.id) {
+            info!("[{}] [==] Client is ready to resume", msg.id);
+            status.set_post_resumed();
+        } else {
+            // This should not happen if pre-restore was successful.
+            error!("[!!] Client {} not found in clients_set during post-resume", msg.id);
+            response_message = MESSAGE_NOT_CONNECTED;
+        }
+
+        // Notify any other threads that are waiting on state changes.
+        self.notifier.notify_all();
+
+        // If the initial state update was successful, wait for all dependencies.
+        if response_message == MESSAGE_ACK {
+            let timeout_duration = Duration::from_secs(self.wait_timeout as u64);
+            let start_time = Instant::now();
+
+            for dependency in msg.dependencies.iter() {
+                if dependency.is_empty() {
+                    continue;
+                }
+                info!("[{}] [==] Waiting for dependency {} to be ready for resume", msg.id, dependency);
+
+                let clients_lock = self.clients.lock().unwrap();
+
+                // Wait until the dependency is also in the post-resumed state.
+                let result = self.notifier.wait_timeout_while(
+                    clients_lock,
+                    timeout_duration.saturating_sub(start_time.elapsed()),
+                    |clients| {
+                        match clients.get(dependency) {
+                            Some(dep_status) => !dep_status.is_post_resumed(),
+                            // CRITICAL: If the dependency is not found, it means it has already
+                            // finished its post-resume, been ACK'd, and its state was cleaned up.
+                            // This is a success condition, so we stop waiting (return false).
+                            None => false
+                        }
+                    }
+                );
+
+                match result {
+                    Ok((_, timeout_result)) => {
+                        if timeout_result.timed_out() {
+                            error!("[{}] [!!] Timeout waiting for dependency {} to be post-resume", msg.id, dependency);
+                            response_message = MESSAGE_TIMEOUT;
+                            break;
+                        }
+                        info!("[{}] [==] Dependency {} is ready for resume", msg.id, dependency);
+                    }
+                    Err(_) => {
+                        error!("[{}] [!!] Error waiting for dependency {}", msg.id, dependency);
+                        response_message = MESSAGE_TIMEOUT;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Send the final response to the client.
         self.send_response(&msg.id, response_message, tcp_stream);
     }
 

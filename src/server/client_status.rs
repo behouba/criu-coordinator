@@ -30,6 +30,7 @@ pub struct ClientStatus {
     local_checkpoint: bool,
     network_locked: bool,
     network_unlocked: bool,
+    post_resumed: bool,
     operation: Operation,
 }
 
@@ -41,6 +42,7 @@ impl ClientStatus {
             local_checkpoint: false,
             network_locked: false,
             network_unlocked: false,
+            post_resumed: false,
             operation,
         }
     }
@@ -79,6 +81,14 @@ impl ClientStatus {
 
     pub fn set_network_unlocked(&mut self) {
         self.network_unlocked = true;
+    }
+
+    pub fn is_post_resumed(&self) -> bool {
+        self.post_resumed
+    }
+
+    pub fn set_post_resumed(&mut self) {
+        self.post_resumed = true;
     }
 
     pub fn get_operation(&self) -> Operation {
